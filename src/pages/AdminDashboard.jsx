@@ -43,10 +43,33 @@ const AdminDashboard = () => {
   const videoRef = useRef(null);
   const isOcrPausedRef = useRef(false);
 
-  const adminName = localStorage.getItem("adminName") || "Admin";
-  const orgName = localStorage.getItem("orgName") || "FastPark Global";
+  const [adminName, setAdminName] = useState("Loading...");
+  const [orgName, setOrgName] = useState("Loading...");
+
+
 
   useEffect(() => {
+    const fetchAdminProfile = async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) {
+        const { data } = await supabase
+          .from("profiles")
+          .select("full_name, place_name")
+          .eq("id", user.id)
+          .single();
+
+        if (data) {
+          setAdminName(data.full_name || "Admin");
+          setOrgName(data.place_name || "FastPark Global");
+
+          // Force update local storage so it stays accurate
+          localStorage.setItem("adminName", data.full_name || "Admin");
+          localStorage.setItem("orgName", data.place_name || "FastPark Global");
+        }
+      }
+    };
+
+    fetchAdminProfile();
     fetchLiveStatus();
     fetchHistory();
     fetchComplaints();
@@ -260,21 +283,55 @@ const AdminDashboard = () => {
   const handleAutoExit = async (plate, currentParked) => {
     const session = currentParked[plate];
     if (!session) return;
+
     const entryTime = new Date(session.entry_time);
     const exitTime = new Date();
     const durationMs = exitTime - entryTime;
     const durationHours = Math.ceil(durationMs / (1000 * 60 * 60));
     const totalFee = durationHours <= 2 ? config.baseFee : config.baseFee + (durationHours - 2) * config.hourly;
 
-    const { error } = await supabase.from("parking_sessions").update({
-      status: "completed",
-      exit_time: exitTime.toISOString(),
-      fee: totalFee,
-    }).eq("plate_number", plate).eq("status", "active");
+    // 1. Close the parking session
+    const { error } = await supabase
+      .from("parking_sessions")
+      .update({
+        status: "completed",
+        exit_time: exitTime.toISOString(),
+        fee: totalFee,
+      })
+      .eq("plate_number", plate)
+      .eq("status", "active");
 
     if (!error) {
       setManualPlate("");
-      toast.success(`Exit Confirmed. ₹${totalFee} collected for ${plate}.`, { style: { background: "#4c0519", color: "#fb7185", border: "1px solid #e11d48" }, icon: "🏁" });
+
+      // 2. THE MAGIC: Find the user with this plate and deduct wallet balance
+      // 2. THE MAGIC: Find the user with this plate and deduct wallet balance
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("id, wallet_balance")
+        .ilike("plate_number", `%${plate}%`)
+        .maybeSingle(); // <-- CHANGED THIS LINE
+
+      if (profile) {
+        const newBalance = profile.wallet_balance - totalFee;
+
+        // Update the database with the new deducted balance
+        await supabase
+          .from("profiles")
+          .update({ wallet_balance: newBalance })
+          .eq("id", profile.id);
+
+        toast.success(`Exit Confirmed! ₹${totalFee} auto-deducted from wallet.`, {
+          style: { background: "#022c22", color: "#34d399", border: "1px solid #059669" },
+          icon: "💸"
+        });
+      } else {
+        // Fallback just in case an unregistered car gets in
+        toast.success(`Exit Confirmed! ₹${totalFee} due. (Cash collection)`, {
+          style: { background: "#4c0519", color: "#fb7185", border: "1px solid #e11d48" },
+          icon: "🏁"
+        });
+      }
     }
   };
 

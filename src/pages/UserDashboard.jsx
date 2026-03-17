@@ -13,7 +13,7 @@ const UserDashboard = () => {
     JSON.parse(localStorage.getItem('myRegisteredPlates')) || []
   );
   const [newPlateInput, setNewPlateInput] = useState("");
-  const [balance, setBalance] = useState(1250);
+  const [balance, setBalance] = useState(0);
 
   // Support Tab States
   const [complaintMsg, setComplaintMsg] = useState("");
@@ -27,6 +27,44 @@ const UserDashboard = () => {
   const userPhone = localStorage.getItem('userPhone') || "N/A";
 
   // --- DATABASE SYNC ---
+  useEffect(() => {
+    // Fetch the real balance on load
+    const fetchUserData = async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) {
+        const { data } = await supabase
+          .from('profiles')
+          .select('wallet_balance')
+          .eq('id', user.id)
+          .single();
+        if (data) setBalance(data.wallet_balance);
+      }
+    };
+
+    fetchUserData();
+
+    // Listen for Admin wallet deductions in real-time!
+    const profileChannel = supabase
+      .channel('wallet-sync')
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'profiles' },
+        (payload) => {
+          // Update the balance number instantly on the UI
+          setBalance(payload.new.wallet_balance);
+          // Show a cool notification to the user
+          toast.success("Wallet auto-deducted for recent parking!", {
+            icon: "💳",
+            style: { background: '#1e293b', color: '#fff', borderRadius: '15px' }
+          });
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(profileChannel);
+    };
+  }, []);
   useEffect(() => {
     fetchActiveSessions();
     if (activeTab === "support") {
