@@ -37,8 +37,9 @@ const AdminDashboard = () => {
   const [parkedCars, setParkedCars] = useState({});
   const [history, setHistory] = useState([]);
   const [complaints, setComplaints] = useState([]);
+  const [reservations, setReservations] = useState([]); // NEW: State for Bookings
   const [config, setConfig] = useState({ slots: 15, baseFee: 50, hourly: 20 });
-  
+
   const videoRef = useRef(null);
   const isOcrPausedRef = useRef(false);
 
@@ -49,6 +50,7 @@ const AdminDashboard = () => {
     fetchLiveStatus();
     fetchHistory();
     fetchComplaints();
+    fetchReservations(); // NEW: Fetch Bookings on load
 
     const plateChannel = supabase
       .channel("public:parking_sessions")
@@ -73,11 +75,34 @@ const AdminDashboard = () => {
       )
       .subscribe();
 
+    // NEW: Realtime listener for Bookings
+    const bookingChannel = supabase
+      .channel("public:bookings")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "bookings" },
+        (payload) => {
+          fetchReservations();
+        }
+      )
+      .subscribe();
+
     return () => {
       supabase.removeChannel(plateChannel);
       supabase.removeChannel(complaintChannel);
+      supabase.removeChannel(bookingChannel);
     };
   }, []);
+
+  // --- NEW: FETCH BOOKINGS ---
+  const fetchReservations = async () => {
+    const { data } = await supabase
+      .from("bookings")
+      .select("*")
+      .eq("status", "reserved")
+      .order("scheduled_time", { ascending: true });
+    if (data) setReservations(data);
+  };
 
   // --- WEBCAM STREAM HANDLING ---
   useEffect(() => {
@@ -140,6 +165,7 @@ const AdminDashboard = () => {
     const { data, error } = await supabase
       .from("complaints")
       .select("*")
+      .eq('status', 'Pending')
       .order("created_at", { ascending: false });
 
     if (data) {
@@ -163,29 +189,26 @@ const AdminDashboard = () => {
     if (!isCameraActive) return;
 
     const scanPlate = async () => {
-      // Skip iteration if temporarily paused after a successful match
       if (isOcrPausedRef.current) return;
 
       const video = videoRef.current;
       if (!video || video.readyState !== 4) return;
-      
+
       setIsScanning(true);
-      
+
       try {
         const canvas = document.createElement("canvas");
         const cropHeight = video.videoHeight / 3;
         canvas.width = video.videoWidth;
         canvas.height = cropHeight;
-        
+
         const ctx = canvas.getContext("2d");
-        
-        // Legacy Filters
+
         ctx.filter = "grayscale(1) contrast(2) brightness(1.5)";
-        
-        // Crop Middle Third
+
         const sy = video.videoHeight / 3;
         ctx.drawImage(video, 0, Math.floor(sy), video.videoWidth, Math.floor(cropHeight), 0, 0, canvas.width, canvas.height);
-        
+
         const dataUrl = canvas.toDataURL("image/jpeg");
 
         const { data: { text } } = await Tesseract.recognize(dataUrl, "eng", {
@@ -193,22 +216,18 @@ const AdminDashboard = () => {
           tessedit_pageseg_mode: '11',
         });
 
-        // Strip garbage characters
         const cleanText = text.replace(/[^A-Z0-9]/g, "");
-        
-        // Legacy strict Indian Plate Regex
         const platePattern = /^[A-Z]{2}[0-9]{2}[A-Z]{2}[0-9]{4}$/;
 
         if (platePattern.test(cleanText)) {
-           console.log("AUTOMATIC VALID PLATE DETECTED:", cleanText);
-           toast.success("Plate Auto-Scanned. Please verify and submit.", { style: { background: "#0f172a", color: "#38bdf8", border: "1px solid #0369a1"}, icon: "🤖" });
-           setManualPlate(cleanText);
-           
-           // Pause the scanner to prevent rewriting the input box if the car stays there
-           isOcrPausedRef.current = true;
-           setTimeout(() => {
-             isOcrPausedRef.current = false;
-           }, 5000); // 5 second pause
+          console.log("AUTOMATIC VALID PLATE DETECTED:", cleanText);
+          toast.success("Plate Auto-Scanned. Please verify and submit.", { style: { background: "#0f172a", color: "#38bdf8", border: "1px solid #0369a1" }, icon: "🤖" });
+          setManualPlate(cleanText);
+
+          isOcrPausedRef.current = true;
+          setTimeout(() => {
+            isOcrPausedRef.current = false;
+          }, 5000);
         }
       } catch (err) {
         console.error("Background OCR Error:", err);
@@ -224,17 +243,17 @@ const AdminDashboard = () => {
 
   const handleAutoEntry = async (plate, currentParked) => {
     if (Object.keys(currentParked).length >= config.slots) {
-       toast.error("Parking Lot Full!");
-       return;
+      toast.error("Parking Lot Full!");
+      return;
     }
     const { error } = await supabase.from("parking_sessions").insert([{
-        plate_number: plate,
-        entry_time: new Date().toISOString(),
-        status: "active",
-      }]);
+      plate_number: plate,
+      entry_time: new Date().toISOString(),
+      status: "active",
+    }]);
     if (!error) {
       setManualPlate("");
-      toast.success(`Entry Granted: ${plate}`, { style: { background: "#022c22", color: "#34d399", border: "1px solid #059669"}, icon: "🚀" });
+      toast.success(`Entry Granted: ${plate}`, { style: { background: "#022c22", color: "#34d399", border: "1px solid #059669" }, icon: "🚀" });
     }
   };
 
@@ -248,14 +267,14 @@ const AdminDashboard = () => {
     const totalFee = durationHours <= 2 ? config.baseFee : config.baseFee + (durationHours - 2) * config.hourly;
 
     const { error } = await supabase.from("parking_sessions").update({
-        status: "completed",
-        exit_time: exitTime.toISOString(),
-        fee: totalFee,
-      }).eq("plate_number", plate).eq("status", "active");
+      status: "completed",
+      exit_time: exitTime.toISOString(),
+      fee: totalFee,
+    }).eq("plate_number", plate).eq("status", "active");
 
     if (!error) {
-       setManualPlate("");
-       toast.success(`Exit Confirmed. ₹${totalFee} collected for ${plate}.`, { style: { background: "#4c0519", color: "#fb7185", border: "1px solid #e11d48"}, icon: "🏁" });
+      setManualPlate("");
+      toast.success(`Exit Confirmed. ₹${totalFee} collected for ${plate}.`, { style: { background: "#4c0519", color: "#fb7185", border: "1px solid #e11d48" }, icon: "🏁" });
     }
   };
 
@@ -271,7 +290,6 @@ const AdminDashboard = () => {
   };
 
   const clearAllHistory = async () => {
-    // Only delete completed transactions to preserve active ones
     const { error } = await supabase.from("parking_sessions").update({ status: 'archived' }).eq('status', 'completed');
     if (!error) {
       toast.success("All History Cleared");
@@ -281,19 +299,39 @@ const AdminDashboard = () => {
     }
   };
 
+  // --- COMPLAINTS LOGIC ---
   const deleteComplaint = async (id) => {
     if (!id) return toast.error("Error: Complaint ID missing!");
-    
-    // 1. Optimistic UI Update (Instant removal)
     setComplaints(prev => prev.filter(c => c.id !== id));
     toast.success("Complaint dismissed!");
-
-    // 2. Background Database Delete
     const { error } = await supabase.from("complaints").delete().eq("id", id);
     if (error) {
       toast.error("Sync Error: " + error.message);
-      fetchComplaints(); // Revert UI if DB fails
+      fetchComplaints();
     }
+  };
+
+  const resolveComplaint = async (id) => {
+    if (!id) return toast.error("Error: Complaint ID missing!");
+    setComplaints(prev => prev.filter(c => c.id !== id));
+    toast.success("Ticket marked as Resolved!", {
+      style: { background: '#022c22', color: '#34d399', border: '1px solid #059669' },
+      icon: '✅'
+    });
+    const { error } = await supabase.from("complaints").update({ status: 'Resolved' }).eq("id", id);
+    if (error) {
+      toast.error("Sync Error: " + error.message);
+      fetchComplaints();
+    }
+  };
+
+  // --- NEW: CANCEL BOOKING ---
+  const cancelBooking = async (id) => {
+    if (!id) return;
+    setReservations(prev => prev.filter(r => r.id !== id));
+    toast.success("Reservation cancelled!");
+    const { error } = await supabase.from("bookings").delete().eq("id", id);
+    if (error) fetchReservations();
   };
 
   const handleLogout = async () => {
@@ -462,13 +500,13 @@ const AdminDashboard = () => {
           </motion.div>
         </div>
 
-        {/* TAB CONTROLS */}
+        {/* TAB CONTROLS - NEW: Added Bookings to the map array */}
         <motion.div
           initial={{ opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
           className="flex flex-wrap bg-black/20 p-1.5 rounded-2xl mb-10 w-fit border border-white/5 backdrop-blur-md shadow-lg"
         >
-          {["monitor", "history", "revenue", "complaints"].map((tab) => (
+          {["monitor", "bookings", "history", "revenue", "complaints"].map((tab) => (
             <motion.button
               key={tab}
               whileTap={{ scale: 0.95 }}
@@ -478,44 +516,40 @@ const AdminDashboard = () => {
               {activeTab === tab && (
                 <motion.div layoutId="activeTab" className="absolute inset-0 bg-blue-600/80 border border-blue-500/50 rounded-xl shadow-neon-blue -z-10" />
               )}
-              {tab === "history" ? "Records" : tab === "revenue" ? "Revenue" : tab === "complaints" ? "Inbox" : "Monitor"}
+              {tab === "history" ? "Records" : tab === "revenue" ? "Revenue" : tab === "complaints" ? "Inbox" : tab === "bookings" ? "Bookings" : "Monitor"}
+
               {tab === "complaints" && complaints.length > 0 && (
                 <span className="absolute top-1 right-2 w-2 h-2 bg-rose-500 rounded-full shadow-[0_0_8px_rgba(244,63,94,0.8)] animate-pulse"></span>
+              )}
+              {tab === "bookings" && reservations.length > 0 && (
+                <span className="absolute top-1 right-2 w-2 h-2 bg-blue-400 rounded-full shadow-[0_0_8px_rgba(96,165,250,0.8)] animate-pulse"></span>
               )}
             </motion.button>
           ))}
         </motion.div>
 
         <AnimatePresence mode="wait">
+
           {/* TAB 1: MONITOR */}
           {activeTab === "monitor" && (
-            <motion.div
-              key="monitor"
-              variants={tabVariants}
-              initial="hidden"
-              animate="visible"
-              exit="exit"
-              className="grid grid-cols-1 lg:grid-cols-12 gap-10 perspective-1000"
-            >
+            <motion.div key="monitor" variants={tabVariants} initial="hidden" animate="visible" exit="exit" className="grid grid-cols-1 lg:grid-cols-12 gap-10 perspective-1000">
               <motion.div variants={itemVariants} className="lg:col-span-4 bg-white/5 backdrop-blur-xl p-8 rounded-[2.5rem] border border-white/10 shadow-[0_0_40px_rgba(0,0,0,0.3)] h-fit flex flex-col items-center">
-                
+
                 {/* HYBRID OCR CAMERA */}
                 <div className="relative bg-black w-full aspect-video rounded-3xl mb-6 overflow-hidden border-2 border-slate-700 shadow-inner group/camera">
-                  
-                  {/* Camera Control Toggle */}
                   <div className="absolute top-4 right-4 z-40 opacity-0 group-hover/camera:opacity-100 transition-opacity">
-                     <button onClick={toggleCamera} className="bg-black/40 backdrop-blur-md p-2 rounded-full border border-white/10 hover:bg-white/10 text-slate-300 hover:text-white transition-all shadow-lg">
-                        {isCameraActive ? <CameraOff size={18} /> : <Camera size={18} />}
-                     </button>
+                    <button onClick={toggleCamera} className="bg-black/40 backdrop-blur-md p-2 rounded-full border border-white/10 hover:bg-white/10 text-slate-300 hover:text-white transition-all shadow-lg">
+                      {isCameraActive ? <CameraOff size={18} /> : <Camera size={18} />}
+                    </button>
                   </div>
 
                   {!isCameraActive ? (
                     <div className="absolute inset-0 bg-slate-950 flex flex-col items-center justify-center">
-                       <CameraOff size={48} className="text-slate-700 mb-4 opacity-50" />
-                       <span className="text-slate-500 font-black uppercase text-xs tracking-[0.3em]">CAMERA OFFLINE</span>
-                       <button onClick={toggleCamera} className="mt-6 bg-blue-500/10 text-blue-400 border border-blue-500/30 px-6 py-2 rounded-full font-bold uppercase text-[10px] tracking-widest hover:bg-blue-500 hover:text-white transition-all shadow-[0_0_15px_rgba(59,130,246,0.2)]">
-                         Turn On Scanner
-                       </button>
+                      <CameraOff size={48} className="text-slate-700 mb-4 opacity-50" />
+                      <span className="text-slate-500 font-black uppercase text-xs tracking-[0.3em]">CAMERA OFFLINE</span>
+                      <button onClick={toggleCamera} className="mt-6 bg-blue-500/10 text-blue-400 border border-blue-500/30 px-6 py-2 rounded-full font-bold uppercase text-[10px] tracking-widest hover:bg-blue-500 hover:text-white transition-all shadow-[0_0_15px_rgba(59,130,246,0.2)]">
+                        Turn On Scanner
+                      </button>
                     </div>
                   ) : (
                     <>
@@ -523,8 +557,8 @@ const AdminDashboard = () => {
                       <div className="absolute top-0 left-0 w-full h-1 bg-blue-500 animate-[scan_2s_ease-in-out_infinite] shadow-[0_0_20px_blue] z-20"></div>
                       <div className="absolute top-4 left-4 z-20 pointer-events-none">
                         <span className="bg-black/60 backdrop-blur-md text-emerald-400 font-bold uppercase text-[10px] tracking-widest px-3 py-1.5 rounded-full border border-emerald-500/30 shadow-[0_0_10px_rgba(16,185,129,0.3)] flex items-center gap-2">
-                           <span className={isScanning ? "w-1.5 h-1.5 rounded-full bg-blue-400 animate-spin" : "w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"}></span>
-                           {isScanning ? "SCANNING LENS..." : "CAMERA ACTIVE"}
+                          <span className={isScanning ? "w-1.5 h-1.5 rounded-full bg-blue-400 animate-spin" : "w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"}></span>
+                          {isScanning ? "SCANNING LENS..." : "CAMERA ACTIVE"}
                         </span>
                       </div>
                     </>
@@ -537,28 +571,18 @@ const AdminDashboard = () => {
                     <span className="w-2 h-2 rounded-full bg-rose-500 shadow-[0_0_8px_rgba(244,63,94,0.8)]"></span>
                     Manual Entry Console
                   </label>
-                  <input
-                    type="text"
-                    value={manualPlate}
-                    onChange={(e) => setManualPlate(e.target.value.toUpperCase().replace(/\s/g, ""))}
-                    placeholder="ENTER VEHICLE PLATE..."
-                    className="w-full p-6 bg-black/40 border border-blue-500/20 rounded-2xl text-center text-3xl font-mono font-black text-blue-300 uppercase outline-none focus:border-blue-500/60 focus:bg-black/60 transition-all shadow-[inset_0_0_20px_rgba(59,130,246,0.1)] focus:shadow-[inset_0_0_30px_rgba(59,130,246,0.2),0_0_15px_rgba(59,130,246,0.3)] placeholder:text-slate-700 tracking-widest"
-                  />
+                  <input type="text" value={manualPlate} onChange={(e) => setManualPlate(e.target.value.toUpperCase().replace(/\s/g, ""))} placeholder="ENTER VEHICLE PLATE..." className="w-full p-6 bg-black/40 border border-blue-500/20 rounded-2xl text-center text-3xl font-mono font-black text-blue-300 uppercase outline-none focus:border-blue-500/60 focus:bg-black/60 transition-all shadow-[inset_0_0_20px_rgba(59,130,246,0.1)] focus:shadow-[inset_0_0_30px_rgba(59,130,246,0.2),0_0_15px_rgba(59,130,246,0.3)] placeholder:text-slate-700 tracking-widest" />
                 </div>
 
                 <div className="grid grid-cols-2 gap-4 w-full">
-                  <motion.button onClick={handleEntry} whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} className="col-span-1 bg-emerald-600/80 border border-emerald-500/50 py-5 rounded-2xl font-black text-xs uppercase shadow-[0_0_20px_rgba(16,185,129,0.3)] hover:shadow-[0_0_30px_rgba(16,185,129,0.6)] hover:bg-emerald-500 transition-all text-white tracking-widest text-center">
-                    🟢 ENTRY
-                  </motion.button>
-                  <motion.button onClick={handleExit} whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} className="col-span-1 bg-rose-600/80 border border-rose-500/50 py-5 rounded-2xl font-black text-xs uppercase shadow-[0_0_20px_rgba(244,63,94,0.3)] hover:shadow-[0_0_30px_rgba(244,63,94,0.6)] hover:bg-rose-500 transition-all text-white tracking-widest text-center">
-                    🔴 EXIT
-                  </motion.button>
+                  <motion.button onClick={handleEntry} whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} className="col-span-1 bg-emerald-600/80 border border-emerald-500/50 py-5 rounded-2xl font-black text-xs uppercase shadow-[0_0_20px_rgba(16,185,129,0.3)] hover:shadow-[0_0_30px_rgba(16,185,129,0.6)] hover:bg-emerald-500 transition-all text-white tracking-widest text-center">🟢 ENTRY</motion.button>
+                  <motion.button onClick={handleExit} whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} className="col-span-1 bg-rose-600/80 border border-rose-500/50 py-5 rounded-2xl font-black text-xs uppercase shadow-[0_0_20px_rgba(244,63,94,0.3)] hover:shadow-[0_0_30px_rgba(244,63,94,0.6)] hover:bg-rose-500 transition-all text-white tracking-widest text-center">🔴 EXIT</motion.button>
                 </div>
               </motion.div>
 
               <motion.div variants={itemVariants} className="lg:col-span-8 bg-white/5 backdrop-blur-xl p-8 rounded-[2.5rem] border border-white/10 shadow-[0_0_40px_rgba(0,0,0,0.3)] h-[700px] overflow-hidden flex flex-col relative">
                 <div className="absolute top-0 right-0 w-64 h-64 bg-emerald-500/5 rounded-full blur-3xl pointer-events-none"></div>
-                
+
                 <h2 className="text-xl font-black italic tracking-wide mb-6 uppercase drop-shadow-md flex justify-between items-center relative z-10 text-white">
                   <span>Live Occupancy</span>
                   <span className="text-[10px] font-bold text-emerald-400 bg-emerald-500/10 px-4 py-1.5 rounded-full border border-emerald-500/30 not-italic uppercase tracking-widest shadow-[0_0_10px_rgba(16,185,129,0.2)]">
@@ -571,15 +595,15 @@ const AdminDashboard = () => {
                     {Array.from({ length: parseInt(config.slots) }).map((_, i) => {
                       let carPlate = Object.keys(parkedCars).find(plate => parkedCars[plate].slot_number === i + 1);
                       if (!carPlate) {
-                         const unassignedCars = Object.values(parkedCars).filter(c => !c.slot_number).map(c => c.plate_number);
-                         const assignedSlots = Object.values(parkedCars).map(c => c.slot_number).filter(Boolean);
-                         let emptySlotCountBeforeMe = 0;
-                         for(let j = 0; j < i; j++) {
-                            if (!assignedSlots.includes(j + 1)) emptySlotCountBeforeMe++;
-                         }
-                         if (emptySlotCountBeforeMe < unassignedCars.length) {
-                             carPlate = unassignedCars[emptySlotCountBeforeMe];
-                         }
+                        const unassignedCars = Object.values(parkedCars).filter(c => !c.slot_number).map(c => c.plate_number);
+                        const assignedSlots = Object.values(parkedCars).map(c => c.slot_number).filter(Boolean);
+                        let emptySlotCountBeforeMe = 0;
+                        for (let j = 0; j < i; j++) {
+                          if (!assignedSlots.includes(j + 1)) emptySlotCountBeforeMe++;
+                        }
+                        if (emptySlotCountBeforeMe < unassignedCars.length) {
+                          carPlate = unassignedCars[emptySlotCountBeforeMe];
+                        }
                       }
                       const car = carPlate ? parkedCars[carPlate] : null;
 
@@ -594,8 +618,8 @@ const AdminDashboard = () => {
                         >
                           <div className="absolute inset-0 bg-blue-500/5 group-hover:bg-blue-500/10 transition-colors pointer-events-none"></div>
                           <span className="text-xs font-bold text-blue-400 uppercase tracking-widest mb-2 relative z-10 flex items-center justify-between">
-                             Lot
-                             <span className="w-1.5 h-1.5 rounded-full bg-blue-500 shadow-[0_0_5px_currentColor]"></span>
+                            Lot
+                            <span className="w-1.5 h-1.5 rounded-full bg-blue-500 shadow-[0_0_5px_currentColor]"></span>
                           </span>
                           <span className="text-xl font-mono font-black text-white uppercase drop-shadow-[0_0_8px_rgba(255,255,255,0.8)] relative z-10">
                             {carPlate}
@@ -611,11 +635,9 @@ const AdminDashboard = () => {
                           className="bg-black/40 p-5 border border-dashed border-slate-700 opacity-50 rounded-[1.5rem] flex flex-col justify-center items-center relative overflow-hidden transition-colors h-full min-h-[120px]"
                         >
                           <span className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-1">
-                             SLOT {i + 1}
+                            SLOT {i + 1}
                           </span>
-                          <span className="text-sm font-black text-slate-600 uppercase">
-                            OPEN
-                          </span>
+                          <span className="text-sm font-black text-slate-600 uppercase">OPEN</span>
                         </motion.div>
                       );
                     })}
@@ -625,16 +647,60 @@ const AdminDashboard = () => {
             </motion.div>
           )}
 
-          {/* TAB 2: RECORDS */}
+          {/* TAB: BOOKINGS (NEW) */}
+          {activeTab === "bookings" && (
+            <motion.div key="bookings" variants={tabVariants} initial="hidden" animate="visible" exit="exit" className="bg-white/5 backdrop-blur-xl rounded-[2.5rem] border border-white/10 shadow-[0_0_40px_rgba(0,0,0,0.3)] overflow-hidden flex flex-col h-[700px] relative">
+              <div className="p-8 border-b border-white/10 flex justify-between items-center bg-black/20">
+                <h2 className="text-xl font-black italic tracking-wide uppercase text-white flex items-center gap-2">
+                  <Calendar size={24} className="text-blue-400" /> Upcoming Reservations
+                </h2>
+                <span className="bg-blue-500/20 text-blue-400 px-4 py-2 rounded-lg text-xs font-bold uppercase tracking-widest border border-blue-500/30">
+                  {reservations.length} Expected
+                </span>
+              </div>
+
+              <div className="overflow-y-auto flex-grow custom-scrollbar p-6 space-y-4">
+                <AnimatePresence>
+                  {reservations.length === 0 ? (
+                    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="flex flex-col items-center justify-center h-full text-slate-500 opacity-60">
+                      <Calendar size={48} className="mb-4 text-blue-500/40" />
+                      <p className="italic font-light tracking-wide">No upcoming reservations.</p>
+                    </motion.div>
+                  ) : (
+                    reservations.map((res) => (
+                      <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95 }} key={res.id} className="bg-black/30 p-6 rounded-3xl border border-white/5 flex flex-col md:flex-row md:justify-between md:items-center gap-4 hover:border-blue-500/30 transition-colors group">
+                        <div className="flex gap-6 items-center">
+                          <div>
+                            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest mb-1">Expected Vehicle</p>
+                            <h4 className="text-2xl font-mono font-black text-blue-300 drop-shadow-[0_0_8px_rgba(96,165,250,0.5)]">{res.plate_number}</h4>
+                          </div>
+                          <div className="hidden md:block h-10 w-px bg-white/10"></div>
+                          <div>
+                            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest mb-1">Scheduled Arrival</p>
+                            <h4 className="text-lg font-bold text-white">{new Date(res.scheduled_time).toLocaleString()}</h4>
+                          </div>
+                        </div>
+
+                        <div className="flex gap-3 mt-2 md:mt-0 opacity-50 group-hover:opacity-100 transition-opacity">
+                          {/* Cancel Reservation Button */}
+                          <button
+                            onClick={() => cancelBooking(res.id)}
+                            className="bg-rose-500/10 text-rose-400 border border-rose-500/30 px-4 py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest hover:bg-rose-500 hover:text-white transition-all flex items-center gap-2"
+                          >
+                            <Trash2 size={12} /> Cancel
+                          </button>
+                        </div>
+                      </motion.div>
+                    ))
+                  )}
+                </AnimatePresence>
+              </div>
+            </motion.div>
+          )}
+
+          {/* TAB: RECORDS */}
           {activeTab === "history" && (
-            <motion.div
-              key="history"
-              variants={tabVariants}
-              initial="hidden"
-              animate="visible"
-              exit="exit"
-              className="bg-white/5 backdrop-blur-xl rounded-[2.5rem] border border-white/10 shadow-[0_0_40px_rgba(0,0,0,0.3)] overflow-hidden flex flex-col h-[700px] relative"
-            >
+            <motion.div key="history" variants={tabVariants} initial="hidden" animate="visible" exit="exit" className="bg-white/5 backdrop-blur-xl rounded-[2.5rem] border border-white/10 shadow-[0_0_40px_rgba(0,0,0,0.3)] overflow-hidden flex flex-col h-[700px] relative">
               <div className="p-8 border-b border-white/10 flex justify-between items-center bg-black/20">
                 <h2 className="text-xl font-black italic tracking-wide uppercase text-white">Record Log</h2>
                 <div className="flex gap-4 items-center">
@@ -657,34 +723,19 @@ const AdminDashboard = () => {
                   </thead>
                   <tbody>
                     {history.filter(row => row.status !== 'archived').map((row) => (
-                      <motion.tr 
-                        initial={{ opacity: 0 }}
-                        animate={{ opacity: 1 }}
-                        key={row.id} 
-                        className="border-b border-white/5 hover:bg-white/5 transition-colors group"
-                      >
-                        <td className="p-4 font-mono font-bold text-blue-300">
-                          {row.plate_number}
-                        </td>
-                        <td className="p-4 text-slate-400 text-xs text-mono">
-                          {new Date(row.entry_time).toLocaleString()}
-                        </td>
+                      <motion.tr initial={{ opacity: 0 }} animate={{ opacity: 1 }} key={row.id} className="border-b border-white/5 hover:bg-white/5 transition-colors group">
+                        <td className="p-4 font-mono font-bold text-blue-300">{row.plate_number}</td>
+                        <td className="p-4 text-slate-400 text-xs text-mono">{new Date(row.entry_time).toLocaleString()}</td>
                         <td className="p-4 text-slate-400 text-xs text-mono">
                           {row.exit_time ? (
                             new Date(row.exit_time).toLocaleString()
                           ) : (
-                            <span className="bg-emerald-500/20 text-emerald-400 px-2 py-1 rounded-full font-bold uppercase text-[9px] border border-emerald-500/30 flex items-center gap-1 w-fit">
-                              Inside
-                            </span>
+                            <span className="bg-emerald-500/20 text-emerald-400 px-2 py-1 rounded-full font-bold uppercase text-[9px] border border-emerald-500/30 flex items-center gap-1 w-fit">Inside</span>
                           )}
                         </td>
-                        <td className="p-4 text-right font-black text-emerald-300">
-                          ₹{row.fee || 0}
-                        </td>
+                        <td className="p-4 text-right font-black text-emerald-300">₹{row.fee || 0}</td>
                         <td className="p-4 text-center">
-                          <button onClick={() => deleteSession(row.id)} className="text-slate-500 hover:text-rose-400 p-1">
-                            <Trash2 size={16} />
-                          </button>
+                          <button onClick={() => deleteSession(row.id)} className="text-slate-500 hover:text-rose-400 p-1"><Trash2 size={16} /></button>
                         </td>
                       </motion.tr>
                     ))}
@@ -694,16 +745,9 @@ const AdminDashboard = () => {
             </motion.div>
           )}
 
-          {/* TAB 3: REVENUE */}
+          {/* TAB: REVENUE */}
           {activeTab === "revenue" && (
-            <motion.div
-              key="revenue"
-              variants={tabVariants}
-              initial="hidden"
-              animate="visible"
-              exit="exit"
-              className="space-y-6"
-            >
+            <motion.div key="revenue" variants={tabVariants} initial="hidden" animate="visible" exit="exit" className="space-y-6">
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                 {[
                   { title: "Today's Earnings", value: dayRevenue, icon: Calendar, borderColor: "border-emerald-500/20", glowColor: "bg-emerald-500/10", iconColor: "text-emerald-400" },
@@ -727,20 +771,14 @@ const AdminDashboard = () => {
                 <motion.div variants={itemVariants} className="lg:col-span-2 bg-white/5 backdrop-blur-xl p-8 rounded-[2.5rem] border border-white/10 shadow-[0_0_30px_rgba(0,0,0,0.3)] relative">
                   <div className="flex justify-between items-center mb-8">
                     <h3 className="text-blue-400 font-bold uppercase text-[10px] tracking-widest flex items-center gap-2">
-                       <TrendingUp size={16} /> Weekly Revenue Trend
+                      <TrendingUp size={16} /> Weekly Revenue Trend
                     </h3>
                     <div className="flex items-center gap-1 bg-black/20 p-1 rounded-xl border border-white/5 shadow-inner">
-                      <button onClick={() => setWeekOffset(prev => prev + 1)} className="p-1.5 hover:bg-white/10 rounded-lg text-slate-400 hover:text-white">
-                        <ChevronLeft size={16} />
-                      </button>
+                      <button onClick={() => setWeekOffset(prev => prev + 1)} className="p-1.5 hover:bg-white/10 rounded-lg text-slate-400 hover:text-white"><ChevronLeft size={16} /></button>
                       <span className="text-[10px] font-bold text-slate-300 w-20 text-center tracking-widest">{weekOffset === 0 ? "THIS WEEK" : `${weekOffset}W AGO`}</span>
-                      <button onClick={() => setWeekOffset(prev => Math.max(0, prev - 1))} disabled={weekOffset === 0} className={`p-1.5 rounded-lg ${weekOffset === 0 ? "opacity-30" : "hover:bg-white/10 text-slate-400 hover:text-white"}`}>
-                        <ChevronRight size={16} />
-                      </button>
+                      <button onClick={() => setWeekOffset(prev => Math.max(0, prev - 1))} disabled={weekOffset === 0} className={`p-1.5 rounded-lg ${weekOffset === 0 ? "opacity-30" : "hover:bg-white/10 text-slate-400 hover:text-white"}`}><ChevronRight size={16} /></button>
                     </div>
                   </div>
-                  
-                  {/* CRITICAL FIX FOR RECHARTS IN FRAMER MOTION: h-64 min-h-[256px] w-full */}
                   <div className="h-64 min-h-[256px] w-full min-w-[300px] relative z-10">
                     <ResponsiveContainer width="100%" height="100%" minHeight={256}>
                       <BarChart data={weeklyChartData}>
@@ -791,6 +829,9 @@ const AdminDashboard = () => {
                       </span>
                       <div className="flex items-center gap-3 relative z-20">
                         <span className="text-[10px] text-slate-500 font-mono font-bold">{new Date(c.created_at).toLocaleDateString()}</span>
+                        <button onClick={() => resolveComplaint(c.id)} className="text-slate-500 hover:text-emerald-400 p-1.5 rounded-md hover:bg-emerald-500/10 transition-colors" title="Mark as Resolved">
+                          <CheckCircle size={14} />
+                        </button>
                         <button onClick={() => deleteComplaint(c.id)} className="text-slate-500 hover:text-rose-400 p-1.5 rounded-md hover:bg-rose-500/10"><Trash2 size={14} /></button>
                       </div>
                     </div>
@@ -817,7 +858,7 @@ const AdminDashboard = () => {
                   <div><label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block mb-2">Base Fee (₹)</label><input type="number" value={config.baseFee} onChange={(e) => setConfig({ ...config, baseFee: Number(e.target.value) })} className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-emerald-400 font-mono font-bold outline-none" /></div>
                   <div><label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block mb-2">Hourly (₹)</label><input type="number" value={config.hourly} onChange={(e) => setConfig({ ...config, hourly: Number(e.target.value) })} className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-emerald-400 font-mono font-bold outline-none" /></div>
                 </div>
-                <button onClick={() => {toast.success("Settings saved."); setIsSettingsOpen(false);}} className="w-full bg-blue-600 hover:bg-blue-500 text-white font-black text-sm uppercase py-4 rounded-xl shadow-neon-blue mt-4">Apply</button>
+                <button onClick={() => { toast.success("Settings saved."); setIsSettingsOpen(false); }} className="w-full bg-blue-600 hover:bg-blue-500 text-white font-black text-sm uppercase py-4 rounded-xl shadow-neon-blue mt-4">Apply</button>
               </div>
             </motion.div>
           </motion.div>
