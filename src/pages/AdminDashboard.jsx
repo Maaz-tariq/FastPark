@@ -304,15 +304,15 @@ const AdminDashboard = () => {
     if (!error) {
       setManualPlate("");
 
-      // 2. THE MAGIC: Find the user with this plate and deduct wallet balance
-      // 2. THE MAGIC: Find the user with this plate and deduct wallet balance
-      const { data: profile } = await supabase
+      // 2. THE MAGIC: Find the user with this plate in the database
+      const { data: profiles } = await supabase
         .from("profiles")
-        .select("id, wallet_balance")
-        .ilike("plate_number", `%${plate}%`)
-        .maybeSingle(); // <-- CHANGED THIS LINE
+        .select("id, wallet_balance, full_name, plate_number")
+        .ilike("plate_number", `%${plate}%`);
 
-      if (profile) {
+      // If it found a matching user profile
+      if (profiles && profiles.length > 0) {
+        const profile = profiles[0];
         const newBalance = profile.wallet_balance - totalFee;
 
         // Update the database with the new deducted balance
@@ -321,13 +321,14 @@ const AdminDashboard = () => {
           .update({ wallet_balance: newBalance })
           .eq("id", profile.id);
 
-        toast.success(`Exit Confirmed! ₹${totalFee} auto-deducted from wallet.`, {
+        // Tell us exactly whose wallet was charged!
+        toast.success(`₹${totalFee} auto-deducted from ${profile.full_name || "User"}'s wallet!`, {
           style: { background: "#022c22", color: "#34d399", border: "1px solid #059669" },
           icon: "💸"
         });
       } else {
-        // Fallback just in case an unregistered car gets in
-        toast.success(`Exit Confirmed! ₹${totalFee} due. (Cash collection)`, {
+        // Fallback if the database has no record of this plate
+        toast.success(`Exit Confirmed! ₹${totalFee} due. No wallet found (Cash collection)`, {
           style: { background: "#4c0519", color: "#fb7185", border: "1px solid #e11d48" },
           icon: "🏁"
         });

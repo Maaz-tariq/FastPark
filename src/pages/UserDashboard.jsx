@@ -65,6 +65,7 @@ const UserDashboard = () => {
       supabase.removeChannel(profileChannel);
     };
   }, []);
+
   useEffect(() => {
     fetchActiveSessions();
     if (activeTab === "support") {
@@ -141,15 +142,34 @@ const UserDashboard = () => {
     }
   };
 
-  const linkNewVehicle = () => {
+  // THE FIX: Async database update added here
+  const linkNewVehicle = async () => {
     if (!newPlateInput || newPlateInput.length < 4) return toast.error("Enter a valid Plate ID");
 
-    const updated = [...new Set([...registeredPlates, newPlateInput.toUpperCase()])];
+    const newPlate = newPlateInput.toUpperCase();
+    const updated = [...new Set([...registeredPlates, newPlate])];
+
+    // 1. Get the currently logged-in user
+    const { data: { user } } = await supabase.auth.getUser();
+
+    if (user) {
+      // 2. Force the database to save this plate to the profile
+      const { error } = await supabase
+        .from('profiles')
+        .update({ plate_number: updated.join(',') })
+        .eq('id', user.id);
+
+      if (error) {
+        return toast.error("Database Error: Could not link vehicle.");
+      }
+    }
+
+    // 3. Update local UI
     setRegisteredPlates(updated);
     localStorage.setItem('myRegisteredPlates', JSON.stringify(updated));
     setNewPlateInput("");
 
-    toast.success(`Vehicle ${newPlateInput} successfully linked!`, {
+    toast.success(`Vehicle ${newPlate} securely saved to database!`, {
       style: { background: '#1e293b', color: '#fff', borderRadius: '15px' }
     });
   };
