@@ -1,12 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { supabase } from '../supabaseClient';
-import { Wallet, Car, MessageSquare, LogOut, Clock, MapPin, Plus, CalendarPlus, X, LifeBuoy, Ticket, HelpCircle, CheckCircle2 } from 'lucide-react';
+import { Wallet, Car, MessageSquare, LogOut, Clock, MapPin, Plus, CalendarPlus, X, LifeBuoy, Ticket, HelpCircle, CheckCircle2, Search } from 'lucide-react';
 import VehicleModal from '../components/VehicleModal';
 import toast from 'react-hot-toast';
 import { motion, AnimatePresence } from 'framer-motion';
 
 const UserDashboard = () => {
-  const [activeTab, setActiveTab] = useState("home"); // NEW: Tab State
+  const [activeTab, setActiveTab] = useState("home");
   const [selectedVehicle, setSelectedVehicle] = useState(null);
   const [activeSessions, setActiveSessions] = useState([]);
   const [registeredPlates, setRegisteredPlates] = useState(
@@ -15,7 +15,6 @@ const UserDashboard = () => {
   const [newPlateInput, setNewPlateInput] = useState("");
   const [balance, setBalance] = useState(0);
 
-  // Support Tab States
   const [complaintMsg, setComplaintMsg] = useState("");
   const [complaintCategory, setComplaintCategory] = useState("General Issue");
   const [myComplaints, setMyComplaints] = useState([]);
@@ -23,12 +22,17 @@ const UserDashboard = () => {
   const [isBookingModalOpen, setIsBookingModalOpen] = useState(false);
   const [bookingData, setBookingData] = useState({ plate_number: '', scheduled_time: '' });
 
+  // NEW: Search Lot Availability States
+  const [isAvailabilityModalOpen, setIsAvailabilityModalOpen] = useState(false);
+  const [searchLotName, setSearchLotName] = useState("");
+  const [lotOccupancyResult, setLotOccupancyResult] = useState(null);
+  const [isSearchingLot, setIsSearchingLot] = useState(false);
+
   const userName = localStorage.getItem('userName') || "User";
   const userPhone = localStorage.getItem('userPhone') || "N/A";
 
   // --- DATABASE SYNC ---
   useEffect(() => {
-    // Fetch the real balance on load
     const fetchUserData = async () => {
       const { data: { user } } = await supabase.auth.getUser();
       if (user) {
@@ -43,16 +47,13 @@ const UserDashboard = () => {
 
     fetchUserData();
 
-    // Listen for Admin wallet deductions in real-time!
     const profileChannel = supabase
       .channel('wallet-sync')
       .on(
         'postgres_changes',
         { event: 'UPDATE', schema: 'public', table: 'profiles' },
         (payload) => {
-          // Update the balance number instantly on the UI
           setBalance(payload.new.wallet_balance);
-          // Show a cool notification to the user
           toast.success("Wallet auto-deducted for recent parking!", {
             icon: "💳",
             style: { background: '#1e293b', color: '#fff', borderRadius: '15px' }
@@ -101,7 +102,6 @@ const UserDashboard = () => {
     if (!error) setActiveSessions(data || []);
   };
 
-  // NEW: Fetch User's Ticket History
   const fetchMyComplaints = async () => {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
@@ -109,13 +109,45 @@ const UserDashboard = () => {
     const { data, error } = await supabase
       .from('complaints')
       .select('*')
-      .eq('userName', user.user_metadata.full_name) // Filtering by their specific name
+      .eq('userName', user.user_metadata.full_name)
       .order('created_at', { ascending: false });
 
     if (!error && data) setMyComplaints(data);
   };
 
   // --- ACTIONS ---
+
+  // NEW: Search Parking Lot Availability Function
+  const searchParkingLot = async () => {
+    if (!searchLotName.trim()) return toast.error("Please enter a parking lot name.");
+    setIsSearchingLot(true);
+    setLotOccupancyResult(null);
+
+    // 1. Get the global system capacity setting
+    const { data: config } = await supabase.from('system_config').select('total_slots').maybeSingle();
+    const totalSlots = config?.total_slots || 15;
+
+    // 2. Count active sessions where the parking lot name matches the search!
+    const { count, error } = await supabase
+      .from('parking_sessions')
+      .select('*', { count: 'exact', head: true })
+      .eq('status', 'active')
+      .ilike('parking_lot_name', `%${searchLotName.trim()}%`); // Flexible search for Area X, Area Y, etc.
+
+    setIsSearchingLot(false);
+
+    if (error) {
+      toast.error("Error connecting to database.");
+    } else {
+      setLotOccupancyResult({
+        name: searchLotName.toUpperCase(),
+        occupied: count || 0,
+        total: totalSlots
+      });
+      toast.success("Live data fetched!", { icon: "📡" });
+    }
+  };
+
   const handleBooking = async () => {
     if (!bookingData.plate_number) return toast.error("Please select a vehicle.");
     if (!bookingData.scheduled_time) return toast.error("Please select a time.");
@@ -142,34 +174,31 @@ const UserDashboard = () => {
     }
   };
 
-  // THE FIX: Async database update added here
   const linkNewVehicle = async () => {
     if (!newPlateInput || newPlateInput.length < 4) return toast.error("Enter a valid Plate ID");
 
     const newPlate = newPlateInput.toUpperCase();
     const updated = [...new Set([...registeredPlates, newPlate])];
 
-    // 1. Get the currently logged-in user
     const { data: { user } } = await supabase.auth.getUser();
 
     if (user) {
-      // 2. Force the database to save this plate to the profile
       const { error } = await supabase
         .from('profiles')
         .update({ plate_number: updated.join(',') })
         .eq('id', user.id);
 
       if (error) {
+        console.error("Link Error:", error);
         return toast.error("Database Error: Could not link vehicle.");
       }
     }
 
-    // 3. Update local UI
     setRegisteredPlates(updated);
     localStorage.setItem('myRegisteredPlates', JSON.stringify(updated));
     setNewPlateInput("");
 
-    toast.success(`Vehicle ${newPlate} securely saved to database!`, {
+    toast.success(`Vehicle ${newPlate} securely linked to database!`, {
       style: { background: '#1e293b', color: '#fff', borderRadius: '15px' }
     });
   };
@@ -185,7 +214,7 @@ const UserDashboard = () => {
         userName: user.user_metadata.full_name,
         message: complaintMsg,
         type: complaintCategory,
-        status: 'Pending' // Explicit status for user history
+        status: 'Pending'
       }]);
 
     if (error) {
@@ -193,7 +222,7 @@ const UserDashboard = () => {
     } else {
       toast.success("Ticket submitted successfully!");
       setComplaintMsg("");
-      fetchMyComplaints(); // Instantly refresh their history
+      fetchMyComplaints();
     }
   };
 
@@ -251,7 +280,7 @@ const UserDashboard = () => {
         </motion.button>
       </motion.nav>
 
-      {/* MOBILE TABS (If viewed on smaller screens) */}
+      {/* MOBILE TABS */}
       <div className="flex md:hidden justify-center mt-6 z-10 relative">
         <div className="flex bg-black/40 p-1.5 rounded-2xl border border-white/10 backdrop-blur-md shadow-inner">
           {["home", "support", "rewards"].map((tab) => (
@@ -274,7 +303,7 @@ const UserDashboard = () => {
 
           {/* ================= HOME TAB ================= */}
           {activeTab === "home" && (
-            <motion.div key="home" variants={containerVariants} initial="hidden" animate="visible" exit={{ opacity: 0, y: -20 }} className="space-y-10 perspective-1000">
+            <motion.div key="home" variants={containerVariants} initial="hidden" animate="visible" exit={{ opacity: 0, y: -20 }} className="space-y-8 perspective-1000">
 
               {/* WALLET SECTION */}
               <motion.div variants={itemVariants} whileHover={{ scale: 1.01, rotateX: 2 }} className="bg-gradient-to-br from-blue-600/90 to-indigo-900/90 backdrop-blur-xl p-10 rounded-[3rem] shadow-[0_0_40px_rgba(59,130,246,0.3)] border border-blue-400/30 flex flex-col md:flex-row justify-between items-center gap-8 relative overflow-hidden group">
@@ -288,13 +317,21 @@ const UserDashboard = () => {
                 </motion.button>
               </motion.div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <motion.button variants={itemVariants} whileHover={{ scale: 1.02, y: -5 }} whileTap={{ scale: 0.98 }} onClick={() => window.open(`https://www.google.com/maps/search/parking+near+me`, '_blank')} className="w-full bg-white/5 backdrop-blur-xl border border-white/10 hover:border-blue-500/50 hover:bg-white/10 text-white py-6 rounded-[2.5rem] font-black text-sm flex items-center justify-center gap-3 transition-all shadow-lg hover:shadow-[0_0_30px_rgba(59,130,246,0.2)] group">
-                  <MapPin className="text-blue-400 group-hover:animate-bounce drop-shadow-[0_0_5px_rgba(59,130,246,0.8)]" /> 📍 NEAREST PARKING
+              {/* CHANGED: Grid now has 3 buttons including the Check Availability Modal Trigger */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <motion.button variants={itemVariants} whileHover={{ scale: 1.02, y: -5 }} whileTap={{ scale: 0.98 }} onClick={() => setIsAvailabilityModalOpen(true)} className="w-full bg-emerald-600/10 backdrop-blur-xl border border-emerald-500/30 hover:border-emerald-500/80 hover:bg-emerald-600/20 text-emerald-400 py-6 rounded-[2rem] font-black text-xs flex flex-col items-center justify-center gap-2 transition-all shadow-lg group">
+                  <Search className="text-emerald-400 group-hover:scale-110 transition-transform drop-shadow-[0_0_5px_rgba(16,185,129,0.8)]" size={28} />
+                  <span className="tracking-widest">LIVE OCCUPANCY</span>
                 </motion.button>
 
-                <motion.button variants={itemVariants} whileHover={{ scale: 1.02, y: -5 }} whileTap={{ scale: 0.98 }} onClick={() => setIsBookingModalOpen(true)} className="w-full bg-blue-600/10 backdrop-blur-xl border border-blue-500/30 hover:border-blue-500/80 hover:bg-blue-600/20 text-white py-6 rounded-[2.5rem] font-black text-sm flex items-center justify-center gap-3 transition-all shadow-[0_0_20px_rgba(59,130,246,0.1)] hover:shadow-[0_0_30px_rgba(59,130,246,0.3)] group">
-                  <CalendarPlus className="text-blue-400 group-hover:scale-110 transition-transform drop-shadow-[0_0_5px_rgba(59,130,246,0.8)]" /> 📅 RESERVE A SLOT
+                <motion.button variants={itemVariants} whileHover={{ scale: 1.02, y: -5 }} whileTap={{ scale: 0.98 }} onClick={() => setIsBookingModalOpen(true)} className="w-full bg-blue-600/10 backdrop-blur-xl border border-blue-500/30 hover:border-blue-500/80 hover:bg-blue-600/20 text-blue-400 py-6 rounded-[2rem] font-black text-xs flex flex-col items-center justify-center gap-2 transition-all shadow-lg group">
+                  <CalendarPlus className="text-blue-400 group-hover:scale-110 transition-transform drop-shadow-[0_0_5px_rgba(59,130,246,0.8)]" size={28} />
+                  <span className="tracking-widest">RESERVE SLOT</span>
+                </motion.button>
+
+                <motion.button variants={itemVariants} whileHover={{ scale: 1.02, y: -5 }} whileTap={{ scale: 0.98 }} onClick={() => window.open(`https://www.google.com/maps/search/parking+near+me`, '_blank')} className="w-full bg-white/5 backdrop-blur-xl border border-white/10 hover:border-slate-300/50 hover:bg-white/10 text-white py-6 rounded-[2rem] font-black text-xs flex flex-col items-center justify-center gap-2 transition-all shadow-lg group">
+                  <MapPin className="text-slate-300 group-hover:animate-bounce drop-shadow-[0_0_5px_rgba(255,255,255,0.5)]" size={28} />
+                  <span className="tracking-widest">NEAREST PARKING</span>
                 </motion.button>
               </div>
 
@@ -443,7 +480,7 @@ const UserDashboard = () => {
             </motion.div>
           )}
 
-          {/* ================= REWARDS TAB (Placeholder) ================= */}
+          {/* ================= REWARDS TAB ================= */}
           {activeTab === "rewards" && (
             <motion.div key="rewards" variants={containerVariants} initial="hidden" animate="visible" exit={{ opacity: 0, y: -20 }} className="flex flex-col items-center justify-center h-96 bg-white/5 backdrop-blur-xl rounded-[3rem] border border-white/10 shadow-[0_0_40px_rgba(0,0,0,0.3)] text-center p-10">
               <div className="w-24 h-24 bg-gradient-to-tr from-purple-500 to-pink-500 rounded-full blur-xl absolute opacity-50 animate-pulse"></div>
@@ -457,6 +494,56 @@ const UserDashboard = () => {
 
       {/* MODALS */}
       <VehicleModal vehicle={selectedVehicle} onClose={() => setSelectedVehicle(null)} />
+
+      {/* NEW: LIVE AVAILABILITY SEARCH MODAL */}
+      <AnimatePresence>
+        {isAvailabilityModalOpen && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 bg-slate-950/80 z-[100] flex items-center justify-center p-6 backdrop-blur-xl">
+            <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.9, y: 20 }} className="bg-white/10 p-8 rounded-[2.5rem] border border-white/20 w-full max-w-md shadow-[0_0_50px_rgba(0,0,0,0.5)] relative overflow-hidden">
+              <div className="absolute top-0 left-[-50%] w-[200%] h-1 bg-gradient-to-r from-transparent via-emerald-500 to-transparent opacity-50"></div>
+              <div className="flex justify-between items-center mb-8 relative z-10">
+                <h3 className="text-xl font-black text-white uppercase italic drop-shadow-[0_0_8px_rgba(255,255,255,0.3)] flex items-center gap-2">
+                  <Search size={24} className="text-emerald-400" /> Check Availability
+                </h3>
+                <button onClick={() => { setIsAvailabilityModalOpen(false); setLotOccupancyResult(null); setSearchLotName(""); }} className="text-slate-400 hover:text-white hover:rotate-90 transition-all bg-white/5 p-2 rounded-full border border-white/10">
+                  <X size={16} />
+                </button>
+              </div>
+              <div className="space-y-6 relative z-10">
+                <div>
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest pl-2 mb-2 block">Parking Lot Name</label>
+                  <input type="text" value={searchLotName} onChange={(e) => setSearchLotName(e.target.value)} placeholder="e.g. Area X, DLF Mall..." className="w-full p-4 bg-black/40 border border-white/10 focus:border-emerald-500/50 focus:bg-white/5 rounded-2xl font-bold text-white shadow-inner outline-none transition-all placeholder:text-slate-600" />
+                </div>
+
+                <motion.button disabled={isSearchingLot} whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={searchParkingLot} className="w-full bg-emerald-600/90 border border-emerald-500/50 py-4 rounded-2xl font-black mt-2 shadow-[0_0_15px_rgba(16,185,129,0.3)] transition-colors hover:bg-emerald-500 text-white tracking-widest flex items-center justify-center gap-2 uppercase disabled:opacity-50">
+                  {isSearchingLot ? "Searching DB..." : "Check Live Status"}
+                </motion.button>
+
+                {/* SEARCH RESULTS UI */}
+                <AnimatePresence>
+                  {lotOccupancyResult && (
+                    <motion.div initial={{ opacity: 0, height: 0, marginTop: 0 }} animate={{ opacity: 1, height: 'auto', marginTop: 24 }} className="bg-emerald-500/10 border border-emerald-500/30 p-6 rounded-2xl flex justify-between items-center relative overflow-hidden overflow-visible">
+                      <div>
+                        <h4 className="text-emerald-400 font-bold uppercase text-[10px] tracking-widest flex items-center gap-2 mb-1">
+                          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span> {lotOccupancyResult.name}
+                        </h4>
+                        <p className="text-4xl font-black text-white">
+                          {Math.max(0, lotOccupancyResult.total - lotOccupancyResult.occupied)} <span className="text-sm font-bold text-slate-400 uppercase tracking-widest ml-1">Open Slots</span>
+                        </p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest mb-1">Capacity</p>
+                        <p className="font-mono text-xl font-black text-slate-300">{lotOccupancyResult.total}</p>
+                      </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       <AnimatePresence>
         {isBookingModalOpen && (

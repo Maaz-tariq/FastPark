@@ -37,7 +37,7 @@ const AdminDashboard = () => {
   const [parkedCars, setParkedCars] = useState({});
   const [history, setHistory] = useState([]);
   const [complaints, setComplaints] = useState([]);
-  const [reservations, setReservations] = useState([]); // NEW: State for Bookings
+  const [reservations, setReservations] = useState([]);
   const [config, setConfig] = useState({ slots: 15, baseFee: 50, hourly: 20 });
 
   const videoRef = useRef(null);
@@ -45,8 +45,6 @@ const AdminDashboard = () => {
 
   const [adminName, setAdminName] = useState("Loading...");
   const [orgName, setOrgName] = useState("Loading...");
-
-
 
   useEffect(() => {
     const fetchAdminProfile = async () => {
@@ -62,7 +60,6 @@ const AdminDashboard = () => {
           setAdminName(data.full_name || "Admin");
           setOrgName(data.place_name || "FastPark Global");
 
-          // Force update local storage so it stays accurate
           localStorage.setItem("adminName", data.full_name || "Admin");
           localStorage.setItem("orgName", data.place_name || "FastPark Global");
         }
@@ -73,7 +70,7 @@ const AdminDashboard = () => {
     fetchLiveStatus();
     fetchHistory();
     fetchComplaints();
-    fetchReservations(); // NEW: Fetch Bookings on load
+    fetchReservations();
 
     const plateChannel = supabase
       .channel("public:parking_sessions")
@@ -98,7 +95,6 @@ const AdminDashboard = () => {
       )
       .subscribe();
 
-    // NEW: Realtime listener for Bookings
     const bookingChannel = supabase
       .channel("public:bookings")
       .on(
@@ -117,7 +113,6 @@ const AdminDashboard = () => {
     };
   }, []);
 
-  // --- NEW: FETCH BOOKINGS ---
   const fetchReservations = async () => {
     const { data } = await supabase
       .from("bookings")
@@ -127,7 +122,6 @@ const AdminDashboard = () => {
     if (data) setReservations(data);
   };
 
-  // --- WEBCAM STREAM HANDLING ---
   useEffect(() => {
     let stream = null;
 
@@ -207,7 +201,6 @@ const AdminDashboard = () => {
     setIsCameraActive(prev => !prev);
   };
 
-  // --- AUTOMATIC BACKGROUND OCR LOOP ---
   useEffect(() => {
     if (!isCameraActive) return;
 
@@ -264,22 +257,55 @@ const AdminDashboard = () => {
     return () => clearInterval(intervalId);
   }, [isCameraActive]);
 
+  // ==========================================
+  // FIX #1 & #2: MUSICAL CHAIRS & LOCATION NAME
+  // ==========================================
   const handleAutoEntry = async (plate, currentParked) => {
     if (Object.keys(currentParked).length >= config.slots) {
       toast.error("Parking Lot Full!");
       return;
     }
+
+    // Mathematically find the lowest available slot number
+    const assignedSlots = Object.values(currentParked)
+      .map(session => session.slot_number)
+      .filter(Boolean);
+
+    let availableSlot = null;
+    for (let i = 1; i <= config.slots; i++) {
+      if (!assignedSlots.includes(i)) {
+        availableSlot = i;
+        break;
+      }
+    }
+
+    if (!availableSlot) {
+      toast.error("No valid slots available!");
+      return;
+    }
+
     const { error } = await supabase.from("parking_sessions").insert([{
       plate_number: plate,
       entry_time: new Date().toISOString(),
       status: "active",
+      parking_lot_name: orgName, // Saves "khana khazana" to DB!
+      slot_number: availableSlot // Locks the car into the exact slot
     }]);
+
     if (!error) {
       setManualPlate("");
-      toast.success(`Entry Granted: ${plate}`, { style: { background: "#022c22", color: "#34d399", border: "1px solid #059669" }, icon: "🚀" });
+      toast.success(`Entry Granted: ${plate} assigned to Slot ${availableSlot}`, {
+        style: { background: "#022c22", color: "#34d399", border: "1px solid #059669" },
+        icon: "🚀"
+      });
+    } else {
+      toast.error("Error saving to database.");
     }
   };
 
+  // ==========================================
+  // FIX #3: FOOLPROOF WALLET DEDUCTION
+  // ==========================================
   const handleAutoExit = async (plate, currentParked) => {
     const session = currentParked[plate];
     if (!session) return;
@@ -290,7 +316,6 @@ const AdminDashboard = () => {
     const durationHours = Math.ceil(durationMs / (1000 * 60 * 60));
     const totalFee = durationHours <= 2 ? config.baseFee : config.baseFee + (durationHours - 2) * config.hourly;
 
-    // 1. Close the parking session
     const { error } = await supabase
       .from("parking_sessions")
       .update({
@@ -304,30 +329,25 @@ const AdminDashboard = () => {
     if (!error) {
       setManualPlate("");
 
-      // 2. THE MAGIC: Find the user with this plate in the database
       const { data: profiles } = await supabase
         .from("profiles")
         .select("id, wallet_balance, full_name, plate_number")
         .ilike("plate_number", `%${plate}%`);
 
-      // If it found a matching user profile
       if (profiles && profiles.length > 0) {
         const profile = profiles[0];
         const newBalance = profile.wallet_balance - totalFee;
 
-        // Update the database with the new deducted balance
         await supabase
           .from("profiles")
           .update({ wallet_balance: newBalance })
           .eq("id", profile.id);
 
-        // Tell us exactly whose wallet was charged!
         toast.success(`₹${totalFee} auto-deducted from ${profile.full_name || "User"}'s wallet!`, {
           style: { background: "#022c22", color: "#34d399", border: "1px solid #059669" },
           icon: "💸"
         });
       } else {
-        // Fallback if the database has no record of this plate
         toast.success(`Exit Confirmed! ₹${totalFee} due. No wallet found (Cash collection)`, {
           style: { background: "#4c0519", color: "#fb7185", border: "1px solid #e11d48" },
           icon: "🏁"
@@ -357,7 +377,6 @@ const AdminDashboard = () => {
     }
   };
 
-  // --- COMPLAINTS LOGIC ---
   const deleteComplaint = async (id) => {
     if (!id) return toast.error("Error: Complaint ID missing!");
     setComplaints(prev => prev.filter(c => c.id !== id));
@@ -383,7 +402,6 @@ const AdminDashboard = () => {
     }
   };
 
-  // --- NEW: CANCEL BOOKING ---
   const cancelBooking = async (id) => {
     if (!id) return;
     setReservations(prev => prev.filter(r => r.id !== id));
@@ -418,7 +436,6 @@ const AdminDashboard = () => {
     .filter(s => new Date(s.exit_time) >= thisWeek)
     .reduce((sum, s) => sum + s.fee, 0);
 
-  // --- WEEKLY CHART DATA ---
   const getWeeklyChartData = () => {
     const targetWeekStart = new Date(thisWeek);
     targetWeekStart.setDate(targetWeekStart.getDate() - (weekOffset * 7));
@@ -444,7 +461,6 @@ const AdminDashboard = () => {
   };
   const weeklyChartData = getWeeklyChartData();
 
-  // --- PEAK ENTRY TIMES ---
   const calculatePeakTimes = () => {
     const counts = { Morning: 0, Afternoon: 0, Evening: 0, Night: 0 };
     let total = 0;
@@ -489,11 +505,9 @@ const AdminDashboard = () => {
   return (
     <div className="bg-slate-950 min-h-screen text-slate-100 font-sans pb-10 relative overflow-hidden selection:bg-blue-500/30">
 
-      {/* AMBIENCE */}
       <div className="fixed top-[-20%] left-[-10%] w-[50%] h-[50%] bg-blue-600/10 blur-[150px] rounded-full pointer-events-none z-0"></div>
       <div className="fixed bottom-[-20%] right-[-10%] w-[50%] h-[50%] bg-emerald-600/10 blur-[150px] rounded-full pointer-events-none z-0"></div>
 
-      {/* NAVBAR */}
       <motion.nav
         initial={{ y: -50, opacity: 0 }}
         animate={{ y: 0, opacity: 1 }}
@@ -528,7 +542,6 @@ const AdminDashboard = () => {
         </div>
       </motion.nav>
 
-      {/* METRICS & MAIN APP AREA */}
       <div className="max-w-7xl mx-auto mt-10 px-6 relative z-10">
         <div className="grid grid-cols-2 md:grid-cols-4 gap-6 mb-10">
           <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }} className="bg-white/5 backdrop-blur-xl border border-white/10 p-6 rounded-[2rem] flex flex-col items-center justify-center shadow-lg hover:shadow-[0_0_20px_rgba(59,130,246,0.2)] transition-shadow">
@@ -558,7 +571,6 @@ const AdminDashboard = () => {
           </motion.div>
         </div>
 
-        {/* TAB CONTROLS - NEW: Added Bookings to the map array */}
         <motion.div
           initial={{ opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
@@ -588,12 +600,10 @@ const AdminDashboard = () => {
 
         <AnimatePresence mode="wait">
 
-          {/* TAB 1: MONITOR */}
           {activeTab === "monitor" && (
             <motion.div key="monitor" variants={tabVariants} initial="hidden" animate="visible" exit="exit" className="grid grid-cols-1 lg:grid-cols-12 gap-10 perspective-1000">
               <motion.div variants={itemVariants} className="lg:col-span-4 bg-white/5 backdrop-blur-xl p-8 rounded-[2.5rem] border border-white/10 shadow-[0_0_40px_rgba(0,0,0,0.3)] h-fit flex flex-col items-center">
 
-                {/* HYBRID OCR CAMERA */}
                 <div className="relative bg-black w-full aspect-video rounded-3xl mb-6 overflow-hidden border-2 border-slate-700 shadow-inner group/camera">
                   <div className="absolute top-4 right-4 z-40 opacity-0 group-hover/camera:opacity-100 transition-opacity">
                     <button onClick={toggleCamera} className="bg-black/40 backdrop-blur-md p-2 rounded-full border border-white/10 hover:bg-white/10 text-slate-300 hover:text-white transition-all shadow-lg">
@@ -623,7 +633,6 @@ const AdminDashboard = () => {
                   )}
                 </div>
 
-                {/* MANUAL / RFID FALLBACK */}
                 <div className="w-full space-y-2 mb-8">
                   <label className="text-[10px] text-slate-400 font-bold uppercase ml-2 tracking-widest flex items-center gap-2">
                     <span className="w-2 h-2 rounded-full bg-rose-500 shadow-[0_0_8px_rgba(244,63,94,0.8)]"></span>
@@ -651,18 +660,8 @@ const AdminDashboard = () => {
                 <div className="overflow-y-auto pr-2 custom-scrollbar relative z-10 flex-grow grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4 auto-rows-max">
                   <AnimatePresence>
                     {Array.from({ length: parseInt(config.slots) }).map((_, i) => {
+                      // Check for specifically assigned slot
                       let carPlate = Object.keys(parkedCars).find(plate => parkedCars[plate].slot_number === i + 1);
-                      if (!carPlate) {
-                        const unassignedCars = Object.values(parkedCars).filter(c => !c.slot_number).map(c => c.plate_number);
-                        const assignedSlots = Object.values(parkedCars).map(c => c.slot_number).filter(Boolean);
-                        let emptySlotCountBeforeMe = 0;
-                        for (let j = 0; j < i; j++) {
-                          if (!assignedSlots.includes(j + 1)) emptySlotCountBeforeMe++;
-                        }
-                        if (emptySlotCountBeforeMe < unassignedCars.length) {
-                          carPlate = unassignedCars[emptySlotCountBeforeMe];
-                        }
-                      }
                       const car = carPlate ? parkedCars[carPlate] : null;
 
                       return car ? (
@@ -705,7 +704,6 @@ const AdminDashboard = () => {
             </motion.div>
           )}
 
-          {/* TAB: BOOKINGS (NEW) */}
           {activeTab === "bookings" && (
             <motion.div key="bookings" variants={tabVariants} initial="hidden" animate="visible" exit="exit" className="bg-white/5 backdrop-blur-xl rounded-[2.5rem] border border-white/10 shadow-[0_0_40px_rgba(0,0,0,0.3)] overflow-hidden flex flex-col h-[700px] relative">
               <div className="p-8 border-b border-white/10 flex justify-between items-center bg-black/20">
@@ -740,7 +738,6 @@ const AdminDashboard = () => {
                         </div>
 
                         <div className="flex gap-3 mt-2 md:mt-0 opacity-50 group-hover:opacity-100 transition-opacity">
-                          {/* Cancel Reservation Button */}
                           <button
                             onClick={() => cancelBooking(res.id)}
                             className="bg-rose-500/10 text-rose-400 border border-rose-500/30 px-4 py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest hover:bg-rose-500 hover:text-white transition-all flex items-center gap-2"
@@ -756,7 +753,6 @@ const AdminDashboard = () => {
             </motion.div>
           )}
 
-          {/* TAB: RECORDS */}
           {activeTab === "history" && (
             <motion.div key="history" variants={tabVariants} initial="hidden" animate="visible" exit="exit" className="bg-white/5 backdrop-blur-xl rounded-[2.5rem] border border-white/10 shadow-[0_0_40px_rgba(0,0,0,0.3)] overflow-hidden flex flex-col h-[700px] relative">
               <div className="p-8 border-b border-white/10 flex justify-between items-center bg-black/20">
@@ -803,7 +799,6 @@ const AdminDashboard = () => {
             </motion.div>
           )}
 
-          {/* TAB: REVENUE */}
           {activeTab === "revenue" && (
             <motion.div key="revenue" variants={tabVariants} initial="hidden" animate="visible" exit="exit" className="space-y-6">
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -869,7 +864,6 @@ const AdminDashboard = () => {
             </motion.div>
           )}
 
-          {/* TAB 4: COMPLAINTS */}
           {activeTab === "complaints" && (
             <motion.div key="complaints" variants={tabVariants} initial="hidden" animate="visible" exit="exit" className="grid grid-cols-1 md:grid-cols-2 gap-6">
               {complaints.length === 0 ? (
@@ -903,7 +897,6 @@ const AdminDashboard = () => {
         </AnimatePresence>
       </div>
 
-      {/* SETTINGS MODAL */}
       <AnimatePresence>
         {isSettingsOpen && (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 bg-black/60 backdrop-blur-md z-[100] flex items-center justify-center p-4">
